@@ -145,6 +145,76 @@ class RefreshTokenRegistrationEngineTests(unittest.TestCase):
         login_kwargs = oauth_client.login_and_get_tokens.call_args.kwargs
         self.assertEqual(login_kwargs["login_source"], "existing_account_recovery")
 
+    @mock.patch("platforms.chatgpt.refresh_token_registration_engine.OAuthManager")
+    @mock.patch("platforms.chatgpt.refresh_token_registration_engine.OAuthClient")
+    @mock.patch("platforms.chatgpt.refresh_token_registration_engine.ChatGPTClient")
+    def test_run_retry_uses_newly_created_email_in_next_attempt(
+        self,
+        mock_chatgpt_client_cls,
+        mock_oauth_client_cls,
+        mock_oauth_manager_cls,
+    ):
+        class RotatingEmailService:
+            service_type = type("ST", (), {"value": "dummy"})()
+
+            def __init__(self):
+                self.index = 0
+
+            def create_email(self):
+                self.index += 1
+                return {
+                    "email": f"user{self.index}@example.com",
+                    "service_id": f"svc-{self.index}",
+                }
+
+            def get_verification_code(self, **kwargs):
+                return "123456"
+
+        register_client = mock.Mock()
+        register_client.device_id = "device-fixed"
+        register_client.ua = "UA"
+        register_client.sec_ch_ua = '"Chromium";v="136"'
+        register_client.impersonate = "chrome136"
+        register_client.register_complete_flow.side_effect = [
+            (False, "network timeout"),
+            (True, "注册成功"),
+        ]
+        mock_chatgpt_client_cls.return_value = register_client
+
+        oauth_client = mock.Mock()
+        oauth_client.login_and_get_tokens.return_value = {
+            "access_token": "at",
+            "refresh_token": "rt",
+            "id_token": "id-token",
+            "account_id": "acct-1",
+        }
+        oauth_client.last_workspace_id = "ws-1"
+        oauth_client._decode_oauth_session_cookie.return_value = {
+            "workspaces": [{"id": "ws-1"}]
+        }
+        oauth_client._get_cookie_value.return_value = "session-1"
+        mock_oauth_client_cls.return_value = oauth_client
+
+        oauth_manager = mock.Mock()
+        oauth_manager.extract_account_info.return_value = {
+            "email": "user2@example.com",
+            "account_id": "acct-1",
+        }
+        mock_oauth_manager_cls.return_value = oauth_manager
+
+        engine = RefreshTokenRegistrationEngine(
+            email_service=RotatingEmailService(),
+            proxy_url="http://127.0.0.1:7890",
+            callback_logger=lambda msg: None,
+            max_retries=2,
+        )
+        result = engine.run()
+
+        self.assertTrue(result.success)
+        call_args = register_client.register_complete_flow.call_args_list
+        self.assertEqual(call_args[0].args[0], "user1@example.com")
+        self.assertEqual(call_args[1].args[0], "user2@example.com")
+
 
 class OAuthClientPasswordlessTests(unittest.TestCase):
     def _make_client(self):
@@ -224,6 +294,34 @@ class OAuthClientPasswordlessTests(unittest.TestCase):
         self.assertEqual(tokens["access_token"], "at")
         follow_state.assert_called_once()
         handle_phone.assert_not_called()
+
+    def test_send_passwordless_login_otp_does_not_send_email_field(self):
+        client = self._make_client()
+        response = mock.Mock()
+        response.status_code = 200
+        response.url = "https://auth.openai.com/api/accounts/passwordless/send-otp"
+        response.json.return_value = {"page": {"type": "email_otp_verification"}}
+        client.session.post = mock.Mock(return_value=response)
+
+        expected_state = FlowState(
+            page_type="email_otp_verification",
+            continue_url="https://auth.openai.com/email-verification",
+            current_url="https://auth.openai.com/email-verification",
+        )
+        with mock.patch.object(
+            client,
+            "_state_from_payload",
+            return_value=expected_state,
+        ):
+            state = client._send_passwordless_login_otp(
+                "user@example.com",
+                "device-fixed",
+            )
+
+        self.assertEqual(state, expected_state)
+        kwargs = client.session.post.call_args.kwargs
+        self.assertNotIn("json", kwargs)
+        self.assertNotIn("data", kwargs)
 
 
 if __name__ == "__main__":

@@ -313,6 +313,7 @@ class RefreshTokenRegistrationEngine:
     def run(self) -> RegistrationResult:
         result = RegistrationResult(success=False, logs=self.logs)
         last_error = ""
+        fixed_email = str(self.email or "").strip()
 
         try:
             for attempt in range(self.max_retries):
@@ -329,6 +330,11 @@ class RefreshTokenRegistrationEngine:
                     else:
                         self._log(f"整流程重试 {attempt + 1}/{self.max_retries} ...")
                         time.sleep(1)
+
+                    # 用户未显式指定邮箱时，每轮都必须使用本轮新购邮箱，
+                    # 避免重试时误复用上一轮邮箱导致收不到验证码。
+                    if not fixed_email:
+                        self.email = None
 
                     self._log("1. 创建邮箱...")
                     if not self._create_email():

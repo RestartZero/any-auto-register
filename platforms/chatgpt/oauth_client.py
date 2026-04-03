@@ -684,7 +684,6 @@ class OAuthClient:
 
         try:
             kwargs = {
-                "json": {"email": email},
                 "headers": headers,
                 "timeout": 30,
                 "allow_redirects": False,
